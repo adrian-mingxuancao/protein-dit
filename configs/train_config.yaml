@@ -1,0 +1,95 @@
+# General configuration
+general:
+  name: 'protein_dit'
+  seed: 42
+  enable_progress_bar: true
+  log_dir: logs/protein_diffusion
+  checkpoint_dir: logs/protein_diffusion/checkpoints
+  use_wandb: true
+  wandb_project: protein_diffusion
+  log_every_steps: 50
+  sample_every_val: 2500
+  samples_to_generate: 512
+  samples_to_save: 3
+  chains_to_save: 1
+  number_chain_steps: 8
+  final_model_samples_to_generate: 10000
+  final_model_samples_to_save: 20
+  final_model_chains_to_save: 1
+  save_model: true
+  test_only: false
+
+# Model configuration
+model:
+  type: 'discrete'
+  transition: 'marginal'
+  model: 'protein_dit'
+  hidden_size: 256
+  depth: 6
+  num_heads: 8
+  mlp_ratio: 4
+  diffusion_steps: 1000
+  diffusion_noise_schedule: 'cosine'
+  guide_scale: 2
+  drop_condition: 0.1
+  lambda_train: [1, 10]  # node and edge training weight
+  ensure_connected: true
+  max_n_nodes: 2699
+  # Transition model configuration
+  transition_model:
+    type: 'marginal'
+    x_classes: 20
+    e_classes: 5
+    p_classes: 20
+    y_classes: 3
+
+# Dataset configuration
+dataset:
+  source: alphafold_train
+  root: /home/caom/AID3/Graph-DiT/data/protein_train
+  datadir: 'data/protein_train'
+  pin_memory: true
+  num_workers: 4
+  edge_method: 'knn'
+  k: 16
+
+# Training configuration
+train:
+  batch_size: 32
+  max_epochs: 100
+  lr: 1e-4
+  weight_decay: 1e-5
+  gradient_clip_val: 1.0
+  early_stopping_patience: 10
+  accelerator: gpu
+  devices: 2
+  precision: 16
+  strategy: ddp
+  limit_val_batches: 1
+  num_sanity_val_steps: 1
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+  check_val_every_n_epoch: 1
+  num_workers: 4
+
+# Logging configuration
+logging:
+  save_dir: logs/protein_diffusion
+  log_every_n_steps: 50
+  val_check_interval: 1.0
+  save_top_k: 3
+  monitor: val_loss
+  mode: min
+  use_wandb: true
+  wandb_project: protein_diffusion
+  wandb_name: protein_dit_run
+  resume_training: false
+  resume_ckpt_path: null
+
+# Data paths
+data:
+  train_path: /home/caom/AID3/Graph-DiT/data/protein_train/processed/protein_train_split.pt
+  val_path: /home/caom/AID3/Graph-DiT/data/protein_train/processed/protein_val_split.pt
+  test_path: /home/caom/AID3/Graph-DiT/data/protein_train/processed/protein_test_split.pt
+  num_classes: 20  # Number of amino acids
+  distance_bins: 5 

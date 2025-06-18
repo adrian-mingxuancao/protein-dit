@@ -1,0 +1,1 @@
+{"num_graphs": 23391, "num_features": 1, "num_classes": 20, "task": "protein_structure", "max_nodes": 2699, "node_features": {"amino_acid": 1, "side_chain": 8, "backbone": 6}, "edge_features": {"distance_bins": 5}, "split": {"train": 14034, "val": 4678, "test": 4679}}
