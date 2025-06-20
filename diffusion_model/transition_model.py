@@ -76,122 +76,66 @@ class ProteinTransitionModel:
 
     def _get_structure_transitions(self, alpha_bar, device, batch_size, edge_index=None, edge_method='radius'):
         """Get structure transition probabilities."""
-        if edge_method == 'knn':
-            # Get edge indices
-            edge_indices = edge_index  # Already in [2, num_edges] format
+        if edge_method == 'dense':
+            # For dense batched data, create transition matrices for each protein
+            # Use actual protein size (2699+ nodes) instead of Graph-DiT's 800
+            n_nodes = 3000  # Max nodes for proteins (larger than your 2699)
+            transitions = []
+            for i in range(batch_size):
+                # Create identity matrix for each protein
+                Q_struct = torch.eye(n_nodes, device=device)
+                
+                # Apply noise schedule
+                Q_struct = alpha_bar[i] * Q_struct + (1 - alpha_bar[i]) * torch.ones_like(Q_struct) / n_nodes
+                
+                transitions.append(Q_struct)
+            
+            return transitions
+        elif edge_method == 'knn':
+            # For kNN, use sparse matrices for memory efficiency
+            edge_indices = edge_index  # [2, num_edges]
             num_edges = edge_indices.size(1)
-            print(f"\nDEBUG: Starting _get_structure_transitions")
-            print(f"DEBUG: edge_indices shape: {edge_indices.shape}")
-            print(f"DEBUG: batch_size: {batch_size}")
-            print(f"DEBUG: num_edges: {num_edges}")
-            print(f"DEBUG: Current GPU memory: {torch.cuda.memory_allocated()/1e9:.2f}GB")
             
-            # Process edges in smaller chunks to avoid OOM
-            chunk_size = 1000  # Process 1000 edges at a time
-            all_shared_edges = []
-            total_shared = 0
+            # Get unique nodes from edge indices
+            unique_nodes = torch.unique(edge_indices)
+            n_nodes = len(unique_nodes)
             
-            for i in range(0, num_edges, chunk_size):
-                end_idx = min(i + chunk_size, num_edges)
-                chunk_src = edge_indices[0, i:end_idx]
-                chunk_dst = edge_indices[1, i:end_idx]
-                print(f"\nDEBUG: Processing chunk {i//chunk_size + 1}")
-                print(f"DEBUG: Current GPU memory: {torch.cuda.memory_allocated()/1e9:.2f}GB")
-                
-                # For each edge in the chunk, find edges that share nodes
-                chunk_shared = 0
-                for j in range(len(chunk_src)):
-                    src = chunk_src[j]
-                    dst = chunk_dst[j]
-                    
-                    # Find edges that share source
-                    shared_src = (edge_indices[0] == src) | (edge_indices[1] == src)
-                    # Find edges that share destination
-                    shared_dst = (edge_indices[0] == dst) | (edge_indices[1] == dst)
-                    # Combine and remove self
-                    shared = shared_src | shared_dst
-                    shared[i + j] = False
-                    
-                    # Get indices of shared edges
-                    shared_indices = torch.nonzero(shared).squeeze(-1)
-                    
-                    if len(shared_indices) > 0:
-                        chunk_shared += len(shared_indices)
-                        # Only print debug for the first 5 edges in the first chunk
-                        if i == 0 and j < 5:
-                            print(f"DEBUG: Edge {i+j} ({src.item()}->{dst.item()}) shares nodes with {len(shared_indices)} other edges")
-                            # Print some example shared edges
-                            if len(shared_indices) > 0:
-                                example_shared = shared_indices[:3]  # First 3 shared edges
-                                for idx in example_shared:
-                                    s = edge_indices[0, idx].item()
-                                    d = edge_indices[1, idx].item()
-                                    print(f"  - Shared edge {idx}: {s}->{d}")
-                        
-                        # Create indices for this edge's transitions
-                        indices = torch.stack([
-                            torch.zeros_like(shared_indices),  # batch dimension
-                            torch.full_like(shared_indices, i + j),  # source edge
-                            shared_indices  # target edge
-                        ])
-                        
-                        # Process this chunk immediately to avoid storing all indices
-                        values = torch.full((indices.size(1),), alpha_bar[0].item(), device=device)
-                        Q_chunk = torch.sparse_coo_tensor(
-                            indices=indices,
-                            values=values,
-                            size=(batch_size, num_edges, num_edges)
-                        )
-                        
-                        # Add to running sum
-                        if len(all_shared_edges) == 0:
-                            all_shared_edges = Q_chunk
-                        else:
-                            all_shared_edges = all_shared_edges + Q_chunk
-                        
-                        # Clear memory
-                        del Q_chunk
-                        torch.cuda.empty_cache()
-                
-                total_shared += chunk_shared
-                print(f"DEBUG: Chunk {i//chunk_size + 1} shared edges: {chunk_shared}")
-                print(f"DEBUG: Average shared edges per edge in chunk: {chunk_shared/len(chunk_src):.2f}")
-                
-                # Clear memory
-                del chunk_src, chunk_dst
-                torch.cuda.empty_cache()
+            print(f"[DEBUG] kNN transition: {n_nodes} nodes, {num_edges} edges", flush=True)
             
-            if len(all_shared_edges) == 0:
-                # If no shared edges, return empty sparse tensor
-                return torch.sparse_coo_tensor(
-                    indices=torch.zeros((2, 0), device=device, dtype=torch.long),
-                    values=torch.zeros(0, device=device),
-                    size=(batch_size, num_edges, num_edges)
-                )
+            # Create sparse transition matrix for memory efficiency
+            print(f"[DEBUG] Creating sparse transition matrix for {n_nodes} nodes", flush=True)
             
-            print(f"\nDEBUG: Total shared edges: {total_shared}")
-            print(f"DEBUG: Average shared edges per edge: {total_shared/num_edges:.2f}")
-            print(f"DEBUG: Final GPU memory: {torch.cuda.memory_allocated()/1e9:.2f}GB")
-            return all_shared_edges
-        
+            # Create diagonal elements (self-transitions)
+            diag_indices = torch.arange(n_nodes, device=device)
+            diag_indices = torch.stack([diag_indices, diag_indices], dim=0)
+            diag_values = alpha_bar * torch.ones(n_nodes, device=device)
+                        
+            # Create off-diagonal elements (kNN transitions)
+            # For simplicity, assume uniform transitions to neighbors
+            off_diag_values = (1 - alpha_bar) / max(num_edges, 1) * torch.ones(num_edges, device=device)
+                        
+            # Combine indices and values
+            all_indices = torch.cat([diag_indices, edge_indices], dim=1)
+            all_values = torch.cat([diag_values, off_diag_values])
+            
+            # Create sparse tensor
+            Q_struct = torch.sparse_coo_tensor(
+                all_indices, 
+                all_values, 
+                size=(n_nodes, n_nodes),
+                device=device,
+                dtype=torch.float32  # Force FP32 for sparse operations
+            ).coalesce()  # Remove duplicates and sort
+            
+            print(f"[DEBUG] Created sparse matrix: {Q_struct.shape}, {Q_struct._nnz()} non-zero elements", flush=True)
+            
+            return [Q_struct]
         else:
-            # Memory-efficient dense approach for radius_graph
-            # Instead of creating full matrix, compute transitions in chunks
-            chunk_size = 1000  # Adjust based on available memory
-            Q_struct = torch.zeros(batch_size, self.n_nodes * (self.X_classes + self.E_classes), 
-                                 self.n_nodes * (self.X_classes + self.E_classes), device=device)
-            
-            total_size = self.n_nodes * (self.X_classes + self.E_classes)
-            for i in range(0, total_size, chunk_size):
-                end_i = min(i + chunk_size, total_size)
-                for j in range(0, total_size, chunk_size):
-                    end_j = min(j + chunk_size, total_size)
-                    # Compute transitions for this chunk
-                    Q_struct[:, i:end_i, j:end_j] = alpha_bar * torch.eye(
-                        end_i - i, device=device
-                    ).unsqueeze(0).expand(batch_size, -1, -1)
-            
-            return Q_struct
+            # For radius method, use dense matrices
+            n_nodes = 3000  # Max nodes for proteins
+            Q_struct = torch.eye(n_nodes, device=device)
+            Q_struct = alpha_bar * Q_struct + (1 - alpha_bar) * torch.ones_like(Q_struct) / n_nodes
+            return [Q_struct]
 
     """
     def _get_sequence_transitions(self, alpha_bar, device, batch_size):
@@ -229,7 +173,20 @@ class ProteinTransitionModel:
         # Calculate dimensions
         n_edges = self.n_nodes * self.E_classes
         
-        # Use very small chunks to reduce memory usage
+        # Skip chunking for single proteins to avoid multiple transition matrix calls
+        if batch_size == 1:
+            print(f"[DEBUG] Single protein - skipping chunking for {self.n_nodes} nodes", flush=True)
+            # Get structure transitions directly
+            Q_struct = self._get_structure_transitions(
+                alpha_bar, 
+                device, 
+                batch_size,
+                edge_index=edge_index,
+                edge_method=edge_method
+            )
+            return [Q_struct]  # Return as list to maintain compatibility
+        
+        # Use very small chunks to reduce memory usage (only for batch_size > 1)
         chunk_size = min(2, batch_size)  # Process only 2 samples at a time
         results = []
         

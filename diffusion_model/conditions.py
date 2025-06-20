@@ -85,7 +85,8 @@ class ProteinSequenceCondition(nn.Module):
         x = self.seq_encoder(x)
         
         # Apply masking
-        x = x.masked_fill(~node_mask.unsqueeze(-1), 0)
+        node_mask_bool = node_mask.bool()
+        x = x.masked_fill(~node_mask_bool.unsqueeze(-1), 0)
         
         return x
 
@@ -110,6 +111,7 @@ class ProteinStructureCondition(nn.Module):
         x = self.struct_encoder(struct_condition)
         
         # Apply masking
-        x = x.masked_fill(~node_mask.unsqueeze(-1).unsqueeze(-1), 0)
+        node_mask_bool = node_mask.bool()
+        x = x.masked_fill(~node_mask_bool.unsqueeze(-1).unsqueeze(-1), 0)
         
         return x 

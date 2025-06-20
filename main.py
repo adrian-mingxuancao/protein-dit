@@ -36,14 +36,14 @@ def main(cfg: DictConfig):
     )
 
     # Set working directory for resume if needed
-    if cfg.logging.resume_training and os.path.exists(cfg.logging.resume_ckpt_path):
-        os.chdir(os.path.dirname(cfg.logging.resume_ckpt_path))
+    if cfg.general.resume is not None and os.path.exists(cfg.general.resume):
+        os.chdir(os.path.dirname(cfg.general.resume))
     
     # Initialize model
-    if cfg.logging.resume_training and os.path.exists(cfg.logging.resume_ckpt_path):
-        print(f"Resuming from checkpoint: {cfg.logging.resume_ckpt_path}")
+    if cfg.general.resume is not None and os.path.exists(cfg.general.resume):
+        print(f"Resuming from checkpoint: {cfg.general.resume}")
         model = Protein_Graph_DiT.load_from_checkpoint(
-            cfg.logging.resume_ckpt_path,
+            cfg.general.resume,
             dataset_infos=dataset_infos,
             train_metrics=train_metrics,
             sampling_metrics=sampling_metrics,
@@ -58,24 +58,23 @@ def main(cfg: DictConfig):
         )
     
     # Configure trainer
-    trainer = Trainer(
+    trainer_kwargs = dict(
         max_epochs=cfg.train.max_epochs,
         accelerator=cfg.train.accelerator,
         devices=cfg.train.devices,
-        strategy=cfg.train.strategy,
         precision=cfg.train.precision,
         gradient_clip_val=cfg.train.gradient_clip_val,
         callbacks=[
             pl.callbacks.EarlyStopping(
-                monitor="val_loss",
+                monitor="val/NLL",
                 patience=cfg.train.early_stopping_patience,
                 mode="min",
             ),
             pl.callbacks.ModelCheckpoint(
                 dirpath=cfg.logging.save_dir + "/checkpoints",
-                filename="{epoch:02d}-{val_loss:.2f}",
+                filename="{epoch:02d}-{val_NLL:.2f}",
                 save_top_k=cfg.logging.save_top_k,
-                monitor=cfg.logging.monitor,
+                monitor="val/NLL",
                 mode=cfg.logging.mode,
             ),
         ],
@@ -85,10 +84,13 @@ def main(cfg: DictConfig):
         val_check_interval=cfg.logging.val_check_interval,
         log_every_n_steps=cfg.logging.log_every_n_steps,
     )
+    if hasattr(cfg.train, 'strategy'):
+        trainer_kwargs['strategy'] = cfg.train.strategy
+    trainer = Trainer(**trainer_kwargs)
 
     # Train and test
     if not cfg.general.test_only:
-        trainer.fit(model, datamodule=datamodule)
+        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.general.resume)
         if cfg.general.save_model:
             trainer.save_checkpoint(f"checkpoints/{cfg.general.name}/last.ckpt")
         trainer.test(model, datamodule=datamodule)

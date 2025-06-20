@@ -1,6 +1,6 @@
 import torch
-from protein_dit.utils import PlaceHolder
-from protein_dit.diffusion import diffusion_utils
+from utils import PlaceHolder
+from diffusion import diffusion_utils
     
 class PredefinedNoiseScheduleDiscrete(torch.nn.Module):
     def __init__(self, noise_schedule, timesteps):

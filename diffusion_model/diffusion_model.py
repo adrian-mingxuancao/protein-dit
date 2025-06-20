@@ -5,12 +5,14 @@ import time
 import os
 import gc
 import torch.nn as nn
+from torch_geometric.utils import to_dense_batch, to_dense_adj
+import torch_geometric.utils
 
 from .transformer import ProteinDenoiser
 from .transition_model import ProteinTransitionModel
 from metrics.protein_metrics_train import TrainLossDiscrete
-from metrics.protein_metrics_sampling import SamplingProteinMetrics
-import protein_dit.utils as utils
+from metrics.protein_metrics_sampling import SamplingProteinMetrics, SumExceptBatchKL, NLL
+import utils as utils
 from .noise_schedule import PredefinedNoiseScheduleDiscrete
 
 class Protein_Graph_DiT(pl.LightningModule):
@@ -60,7 +62,6 @@ class Protein_Graph_DiT(pl.LightningModule):
             drop_condition=cfg.model.drop_condition,
             Xdim=self.Xdim,
             Edim=self.Edim,
-            Pdim=self.Xdim,  # Using same dimension as amino acids for sequence
             ydim=self.ydim
         )
         self.loss_fn = TrainLossDiscrete(lambda_train=cfg.model.lambda_train)
@@ -77,34 +78,115 @@ class Protein_Graph_DiT(pl.LightningModule):
         self.val_counter = 0
         self.batch_size = cfg.train.batch_size
 
+        # Validation/Test metrics (matching Graph-DiT)
+        self.val_nll = NLL()
+        self.val_X_kl = SumExceptBatchKL()
+        self.val_E_kl = SumExceptBatchKL()
+        self.val_X_logp = TrainLossDiscrete(lambda_train=cfg.model.lambda_train).train_X_logp
+        self.val_E_logp = TrainLossDiscrete(lambda_train=cfg.model.lambda_train).train_E_logp
+        self.val_y_collection = []
+
+        # Test metrics (matching Graph-DiT)
+        self.test_nll = NLL()
+        self.test_X_kl = SumExceptBatchKL()
+        self.test_E_kl = SumExceptBatchKL()
+        self.test_X_logp = TrainLossDiscrete(lambda_train=cfg.model.lambda_train).train_X_logp
+        self.test_E_logp = TrainLossDiscrete(lambda_train=cfg.model.lambda_train).train_E_logp
+        self.test_y_collection = []
+        self.sampling_metrics = SamplingProteinMetrics(
+            dataset_infos,
+            [],  # train_sequences, fill as needed
+            []   # reference_sequences, fill as needed
+        )
+
     def forward(self, noisy_data, unconditioned=False):
-        x, e, y = noisy_data['X_t'].float(), noisy_data['E_t'].float(), noisy_data['y_t'].float().clone()
-        node_mask, t = noisy_data['node_mask'], noisy_data['t']
-        pred = self.denoiser(x, e, node_mask, y=y, t=t, unconditioned=unconditioned)
+        # Extract data from noisy_data
+        x = noisy_data['X_t'].float()  # [B, max_nodes, Xdim]
+        e = noisy_data['E_t'].float()  # [total_edges, Edim] - sparse kNN edges
+        node_mask = noisy_data['node_mask']  # [B, max_nodes]
+        t = noisy_data['t']  # [B, 1] - time tensor
+        edge_index = noisy_data.get('edge_index', None)  # [2, total_edges] - for sparse edges
+        batch = noisy_data.get('batch', None)  # [total_nodes] - for sparse edges
+        
+        print(f"[DEBUG] Forward method - t shape: {t.shape}", flush=True)
+        print(f"[DEBUG] Forward method - x shape: {x.shape}", flush=True)
+        print(f"[DEBUG] Forward method - e shape: {e.shape}", flush=True)
+        
+        # Create sequence features (same as node features for now)
+        p = x.clone()  # [B, max_nodes, Xdim] - sequence features same as node features
+        
+        # Graph-DiT approach: create dummy y if not present
+        if 'y_t' in noisy_data:
+            y = noisy_data['y_t'].float().clone()
+        else:
+            # Create dummy y tensor for unsupervised protein generation
+            batch_size = x.size(0)
+            y = torch.zeros(batch_size, self.ydim, device=x.device)
+        
+        # Pass arguments in correct order: (x, e, p, node_mask, y, t, unconditioned, edge_index, batch)
+        pred = self.denoiser(x, e, p, node_mask, y, t, unconditioned=unconditioned, edge_index=edge_index, batch=batch)
         return pred
 
     def training_step(self, data, i):
-        # Convert to one-hot
-        data_x = F.one_hot(data.x.long().squeeze(-1), num_classes=self.Xdim).float()
-        data_edge_attr = F.one_hot(data.edge_attr.long(), num_classes=self.Edim).float()
-
-        # Store data for apply_noise
-        self.data = data
-
-        # Apply noise
-        noisy_data = self.apply_noise(data_x, data_edge_attr, data.y, data.batch)
-        pred = self.forward(noisy_data)
-
-        # Compute loss
-        loss = self.loss_fn(
-            masked_pred_X=pred.X,
-            masked_pred_E=pred.E,
-            true_X=data_x,
-            true_E=data_edge_attr
-        )
-
-        self.log('loss', loss, batch_size=data_x.size(0), sync_dist=True)
-        return {'loss': loss}
+        try:
+            print("[DEBUG] Entered training_step", flush=True)
+            print(f"[DEBUG] Data type: {type(data)}", flush=True)
+            # Handle both single Data objects and batches
+            if isinstance(data, list):
+                print(f"[DEBUG] Got list with {len(data)} items", flush=True)
+                protein_data = data[0]
+                batch_size = 1
+            else:
+                batch_size = data.num_graphs if hasattr(data, 'num_graphs') else 1
+                print(f"[DEBUG] Processing batch with {batch_size} proteins", flush=True)
+                protein_data = data
+            # Convert to one-hot like Graph-DiT
+            data_x = F.one_hot(protein_data.x.long().squeeze(-1), num_classes=self.Xdim).float()
+            data_edge_attr = F.one_hot(protein_data.edge_attr.long(), num_classes=self.Edim).float()
+            print(f"[DEBUG] Original data_x shape: {data_x.shape}", flush=True)
+            print(f"[DEBUG] Original data_edge_attr shape: {data_edge_attr.shape}", flush=True)
+            # For kNN, keep edges sparse! Don't convert to dense
+            # Get actual max nodes from the batch for node features only
+            if isinstance(data, list):
+                max_nodes = max([d.num_nodes for d in data])
+            else:
+                # For batched PyG data, get max nodes from the batch
+                batch_tensor = protein_data.batch
+                max_nodes = 0
+                for i in range(batch_size):
+                    protein_nodes = (batch_tensor == i).sum().item()
+                    max_nodes = max(max_nodes, protein_nodes)
+            print(f"[DEBUG] Actual max_nodes in batch: {max_nodes}", flush=True)
+            # Convert only node features to dense, keep edges sparse
+            X, node_mask = to_dense_batch(data_x, protein_data.batch, max_num_nodes=max_nodes)
+            print(f"[DEBUG] Dense X shape: {X.shape}", flush=True)
+            print(f"[DEBUG] Sparse E shape: {data_edge_attr.shape}", flush=True)
+            print(f"[DEBUG] Node mask shape: {node_mask.shape}", flush=True)
+            # Store sparse edge data for apply_noise
+            self.data = protein_data
+            # Apply noise using sparse kNN approach
+            noisy_data = self.apply_noise(X, data_edge_attr, node_mask)
+            print("[DEBUG] Returned from apply_noise", flush=True)
+            pred = self.forward(noisy_data)
+            print("[DEBUG] Returned from forward", flush=True)
+            # Now compute loss with sparse edges
+            loss = self.loss_fn(
+                masked_pred_X=pred.X,
+                masked_pred_E=pred.E,
+                true_X=X,
+                true_E=data_edge_attr,
+                edge_index=noisy_data['edge_index'],
+                batch=noisy_data['batch']
+            )
+            print(f"[DEBUG] Loss computed: {loss}", flush=True)
+            # Log loss with actual batch size
+            self.log('loss', loss, batch_size=batch_size, sync_dist=True)
+            return {'loss': loss}
+        except Exception as e:
+            print(f"[ERROR] Exception in training_step: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
 
     def configure_optimizers(self):
         params = self.parameters()
@@ -134,103 +216,83 @@ class Protein_Graph_DiT(pl.LightningModule):
             log = False
         self.loss_fn.log_epoch_metrics(self.current_epoch, self.start_epoch_time, log)
 
-    def apply_noise(self, X, E, P, batch):
-        """Apply noise to the data."""
-        # Debug prints for input shapes
-        print(f"\nInput shapes:")
-        print(f"X shape: {X.shape}")
-        print(f"E shape: {E.shape}")
-        print(f"X total elements: {X.numel()}")
-        print(f"E total elements: {E.numel()}")
-        
-        # Get timestep
-        t = torch.randint(0, self.T, (X.size(0),), device=X.device)
-        t_float = t / self.T
-        alpha_bar_t = self.noise_schedule.get_alpha_bar(t_normalized=t_float)
-        
-        # Get edge index from data
-        edge_index = None
-        edge_method = 'radius'  # Default to radius
-        if hasattr(self, 'data') and hasattr(self.data, 'edge_index'):
-            edge_index = self.data.edge_index
-            edge_method = 'knn'  # Use kNN when we have edge_index
-            print(f"Got edge_index from data: shape={edge_index.shape}")  # Always print this
-        else:
-            print("No edge_index found in data")  # Always print this
-        
-        # Get transition probabilities
-        transitions = self.transition_model.get_Qt_bar(
-            alpha_bar_t, 
-            X.device, 
-            X.size(0),
-            edge_index=edge_index,
-            edge_method=edge_method  # Pass edge_method here
-        )
-        
-        # Process each chunk
-        X_t_list = []
-        E_t_list = []
-        
-        for i, (Q_struct, Q_seq) in enumerate(transitions):
-            # Get current chunk
-            chunk_size = Q_struct.size(0)
-            X_chunk = X[i:i+chunk_size]  # [B, n, X]
-            E_chunk = E[i:i+chunk_size]  # [B, e, E] where e is number of edges
-            
-            print(f"\nProcessing chunk {i}:")
-            print(f"X_chunk shape: {X_chunk.shape}")
-            print(f"E_chunk shape: {E_chunk.shape}")
-            print(f"Q_struct shape: {Q_struct.shape}")
-            
-            if edge_method == 'knn':
-                # For kNN, Q_struct is sparse
-                # Process amino acids
-                n_nodes = X_chunk.size(1)  # Get number of nodes
-                X_flat = X_chunk.reshape(-1, self.Xdim)  # [B*n, X]
-                print(f"X_flat shape: {X_flat.shape}")
-                
-                # Process edges
-                E_flat = E_chunk.reshape(-1, self.Edim)  # [B*e, E]
-                print(f"E_flat shape: {E_flat.shape}")
-                
-                # Process amino acids
-                X_probs = torch.sparse.mm(Q_struct, X_flat)  # [n, X]
-                X_probs = X_probs.reshape(chunk_size, n_nodes, self.Xdim)  # [B, n, X]
-                
-                # Process edges
-                E_probs = torch.sparse.mm(Q_struct, E_flat)  # [e, E]
-                E_probs = E_probs.reshape(chunk_size, -1, self.Edim)  # [B, e, E]
-                
-                # Add cross-transitions
-                X_to_E = torch.sparse.mm(Q_struct, X_flat)  # [n, X]
-                X_to_E = X_to_E.reshape(chunk_size, n_nodes, self.Edim)  # [B, n, E]
-                
-                E_to_X = torch.sparse.mm(Q_struct, E_flat)  # [e, E]
-                E_to_X = E_to_X.reshape(chunk_size, -1, self.Xdim)  # [B, e, X]
-                
-                # Combine structure probabilities
-                X_t = X_probs + E_to_X
-                E_t = E_probs + X_to_E  # [B, e, E]
-            else:
-                print(f"Processing chunk {i} with dense matrices")
-                # For radius method, use dense matrices
-                X_t = torch.matmul(Q_struct, X_chunk.reshape(chunk_size, -1, self.Xdim)).reshape(chunk_size, X_chunk.size(1), self.Xdim)
-                E_t = torch.matmul(Q_struct, E_chunk.reshape(chunk_size, -1, self.Edim)).reshape(chunk_size, E_chunk.size(1), self.Edim)
-            
-            # Store results
-            X_t_list.append(X_t)
-            E_t_list.append(E_t)
-        
-        # Concatenate results
-        X_t = torch.cat(X_t_list, dim=0)
-        E_t = torch.cat(E_t_list, dim=0)
-        
-        return {
-            'X_t': X_t,
-            'E_t': E_t,
-            't': t,
-            'node_mask': self.data.node_mask if hasattr(self, 'data') else None
-        }
+    def apply_noise(self, X, E, node_mask):
+        try:
+            print(f"\n[DEBUG] Entered apply_noise", flush=True)
+            print(f"Input shapes:")
+            print(f"X shape: {X.shape}")  # [batch_size, max_nodes, Xdim]
+            print(f"E shape: {E.shape}")  # [total_edges, Edim] - sparse kNN edges
+            print(f"node_mask shape: {node_mask.shape}")  # [batch_size, max_nodes]
+            batch_size = X.size(0)
+            max_nodes = X.size(1)
+            # Get timestep like Graph-DiT
+            print(f"[DEBUG] Creating time tensor with batch_size={batch_size}", flush=True)
+            t = torch.randint(0, self.T, (batch_size, 1), device=X.device).float()  # (bs, 1) like original Graph-DiT
+            print(f"[DEBUG] Time tensor shape: {t.shape}", flush=True)
+            t_float = t / self.T
+            print(f"[DEBUG] t_float shape: {t_float.shape}", flush=True)
+            alpha_bar_t = self.noise_schedule.get_alpha_bar(t_normalized=t_float)
+            print(f"[DEBUG] Using sparse kNN approach", flush=True)
+            print(f"[DEBUG] alpha_bar_t: {alpha_bar_t}", flush=True)
+            # For sparse kNN edges, process each protein separately
+            X_t_list = []
+            E_t_list = []
+            # Get edge index from stored data
+            edge_index = self.data.edge_index  # [2, total_edges]
+            batch_tensor = self.data.batch  # [total_nodes]
+            print(f"[DEBUG] edge_index shape: {edge_index.shape}", flush=True)
+            print(f"[DEBUG] batch_tensor shape: {batch_tensor.shape}", flush=True)
+            for i in range(batch_size):
+                # Get current protein
+                X_protein = X[i:i+1]  # [1, max_nodes, Xdim]
+                mask_protein = node_mask[i:i+1]  # [1, max_nodes]
+                alpha_i = alpha_bar_t[i]
+                print(f"\nProcessing protein {i}:", flush=True)
+                print(f"X_protein shape: {X_protein.shape}", flush=True)
+                print(f"alpha_i: {alpha_i}", flush=True)
+                # Get edges for this protein by checking which edges have both source and target in this protein
+                # First, get the node indices for this protein
+                protein_node_mask = (batch_tensor == i)  # [total_nodes]
+                protein_node_indices = torch.where(protein_node_mask)[0]  # Indices of nodes in this protein
+                # Get the start and end indices for this protein's nodes
+                start_idx = protein_node_indices[0] if len(protein_node_indices) > 0 else 0
+                end_idx = protein_node_indices[-1] + 1 if len(protein_node_indices) > 0 else 0
+                # Filter edges where both source and target are in this protein
+                src_in_protein = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx)
+                dst_in_protein = (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
+                protein_edge_mask = src_in_protein & dst_in_protein
+                edge_indices = edge_index[:, protein_edge_mask]  # [2, num_edges_in_protein]
+                edge_features = E[protein_edge_mask]  # [num_edges_in_protein, Edim]
+                print(f"Protein {i} edges: {edge_indices.shape}, features: {edge_features.shape}", flush=True)
+                # Apply noise to node features
+                uniform_X = torch.ones_like(X_protein) / self.Xdim
+                X_t = alpha_i * X_protein + (1 - alpha_i) * uniform_X
+                # Apply noise to edge features
+                uniform_E = torch.ones_like(edge_features) / self.Edim
+                E_t = alpha_i * edge_features + (1 - alpha_i) * uniform_E
+                # Store results
+                X_t_list.append(X_t)
+                E_t_list.append(E_t)
+            # Concatenate results
+            X_t = torch.cat(X_t_list, dim=0)  # [batch_size, max_nodes, Xdim]
+            E_t = torch.cat(E_t_list, dim=0)  # [total_edges, Edim] - keep sparse
+            print(f"[DEBUG] Final X_t shape: {X_t.shape}", flush=True)
+            print(f"[DEBUG] Final E_t shape: {E_t.shape}", flush=True)
+            # Keep everything sparse! No dense conversion needed
+            # The denoiser will handle sparse edges directly
+            return {
+                'X_t': X_t,  # [B, max_nodes, Xdim] - dense node features
+                'E_t': E_t,  # [total_edges, Edim] - sparse kNN edges
+                't': t,
+                'node_mask': node_mask,
+                'edge_index': edge_index,  # [2, total_edges] - for sparse processing
+                'batch': batch_tensor  # [total_nodes] - for sparse processing
+            }
+        except Exception as e:
+            print(f"[ERROR] Exception in apply_noise: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
 
     def sample_batch(self, batch_id, batch_size, y, keep_chain, number_chain_steps, save_final, num_nodes=None):
         """Sample a batch of proteins."""
@@ -242,9 +304,9 @@ class Protein_Graph_DiT(pl.LightningModule):
         # Create node mask
         if num_nodes is None:
             num_nodes = torch.randint(1, self.max_n_nodes + 1, (batch_size,), device=self.device)
-        node_mask = torch.zeros(batch_size, self.max_n_nodes, device=self.device)
+        node_mask = torch.zeros(batch_size, self.max_n_nodes, dtype=torch.bool, device=self.device)  # Standardize as bool
         for i in range(batch_size):
-            node_mask[i, :num_nodes[i]] = 1
+            node_mask[i, :num_nodes[i]] = True
         
         # Sampling loop
         for t in range(self.T - 1, -1, -1):
@@ -265,7 +327,205 @@ class Protein_Graph_DiT(pl.LightningModule):
             E = pred.E
             
             # Apply node mask
-            X = X * node_mask.unsqueeze(-1)
-            E = E * node_mask.unsqueeze(-1).unsqueeze(-1)
+            X = X * node_mask.unsqueeze(-1).float()  # Cast to float for multiplication
+            E = E * node_mask.unsqueeze(-1).unsqueeze(-1).float()  # Cast to float for multiplication
         
         return X, E, y, node_mask 
+
+    def on_validation_epoch_start(self) -> None:
+        self.val_nll.reset()
+        self.val_X_kl.reset()
+        self.val_E_kl.reset()
+        self.val_X_logp.reset()
+        self.val_E_logp.reset()
+        self.val_y_collection = []
+
+    def on_validation_epoch_end(self) -> None:
+        metrics = [
+            self.val_nll.compute(),
+            self.val_X_kl.compute() * self.T,
+            self.val_E_kl.compute() * self.T,
+            self.val_X_logp.compute(),
+            self.val_E_logp.compute()
+        ]
+        if self.current_epoch / self.trainer.max_epochs in [0.25, 0.5, 0.75, 1.0]:
+            print(f"Epoch {self.current_epoch}: Val NLL {metrics[0]:.2f} -- Val Atom type KL {metrics[1]:.2f} -- ",
+                  f"Val Edge type KL: {metrics[2]:.2f}", 'Val loss: %.2f \t Best :  %.2f\n' % (metrics[0], self.best_val_nll))
+        self.log("val/NLL", metrics[0], sync_dist=True)
+        self.log("val/X_KL", metrics[1], sync_dist=True)
+        self.log("val/E_KL", metrics[2], sync_dist=True)
+        self.log("val/X_logp", metrics[3], sync_dist=True)
+        self.log("val/E_logp", metrics[4], sync_dist=True)
+        if metrics[0] < self.best_val_nll:
+            self.best_val_nll = metrics[0]
+        self.val_counter += 1 
+
+    @torch.no_grad()
+    def validation_step(self, data, batch_idx):
+        # Prepare batch (handle both single Data and batch)
+        if isinstance(data, list):
+            protein_data = data[0]
+            batch_size = 1
+        else:
+            batch_size = data.num_graphs if hasattr(data, 'num_graphs') else 1
+            protein_data = data
+        # Convert to one-hot
+        data_x = F.one_hot(protein_data.x.long().squeeze(-1), num_classes=self.Xdim).float()
+        data_edge_attr = F.one_hot(protein_data.edge_attr.long(), num_classes=self.Edim).float()
+        # Get max nodes for dense node features
+        if isinstance(data, list):
+            max_nodes = max([d.num_nodes for d in data])
+        else:
+            batch_tensor = protein_data.batch
+            max_nodes = 0
+            for i in range(batch_size):
+                protein_nodes = (batch_tensor == i).sum().item()
+                max_nodes = max(max_nodes, protein_nodes)
+        X, node_mask = to_dense_batch(data_x, protein_data.batch, max_num_nodes=max_nodes)
+        # Store sparse edge data for apply_noise
+        self.data = protein_data
+        # Apply noise
+        noisy_data = self.apply_noise(X, data_edge_attr, node_mask)
+        pred = self.forward(noisy_data)
+
+        # Convert sparse edge ground truth to dense, matching training logic
+        edge_index = protein_data.edge_index
+        batch = protein_data.batch
+        true_E = data_edge_attr
+        pred_E = pred.E
+        dense_E = torch.zeros(pred_E.size(0), pred_E.size(1), pred_E.size(2), pred_E.size(3), device=pred_E.device)
+        for i in range(batch_size):
+            protein_node_mask = (batch == i)
+            protein_node_indices = torch.where(protein_node_mask)[0]
+            protein_edge_mask = torch.isin(edge_index[0], protein_node_indices)
+            protein_edges = edge_index[:, protein_edge_mask]
+            protein_edge_features = true_E[protein_edge_mask]
+            local_edge_index = torch.zeros_like(protein_edges)
+            for j, global_idx in enumerate(protein_node_indices):
+                local_edge_index[0][protein_edges[0] == global_idx] = j
+                local_edge_index[1][protein_edges[1] == global_idx] = j
+            dense_E[i, local_edge_index[0], local_edge_index[1]] = protein_edge_features
+
+        # Debug prints for shapes
+        print(f"[DEBUG] pred.X shape: {pred.X.shape}, X shape: {X.shape}")
+        print(f"[DEBUG] pred.E shape: {pred_E.shape}, dense_E shape: {dense_E.shape}")
+
+        # Use dense edge metric computation
+        self.val_nll(pred.X, X)
+        self.val_X_kl(pred.X, X)
+        self.val_E_kl(pred_E, dense_E)
+        self.val_X_logp(pred.X, X)
+        self.val_E_logp(pred_E, dense_E)
+
+        # Log NLL for this batch
+        nll_value = self.val_nll.compute()
+        self.log('valid_nll', nll_value, batch_size=batch_size, sync_dist=True)
+
+        # Store y for sampling metrics if available
+        if hasattr(protein_data, 'y'):
+            self.val_y_collection.append(protein_data.y)
+        return {'loss': nll_value}
+
+    @torch.no_grad()
+    def test_step(self, data, batch_idx):
+        # Prepare batch (handle both single Data and batch)
+        if isinstance(data, list):
+            protein_data = data[0]
+            batch_size = 1
+        else:
+            batch_size = data.num_graphs if hasattr(data, 'num_graphs') else 1
+            protein_data = data
+        # Convert to one-hot
+        data_x = F.one_hot(protein_data.x.long().squeeze(-1), num_classes=self.Xdim).float()
+        data_edge_attr = F.one_hot(protein_data.edge_attr.long(), num_classes=self.Edim).float()
+        # Get max nodes for dense node features
+        if isinstance(data, list):
+            max_nodes = max([d.num_nodes for d in data])
+        else:
+            batch_tensor = protein_data.batch
+            max_nodes = 0
+            for i in range(batch_size):
+                protein_nodes = (batch_tensor == i).sum().item()
+                max_nodes = max(max_nodes, protein_nodes)
+        X, node_mask = to_dense_batch(data_x, protein_data.batch, max_num_nodes=max_nodes)
+        # Store sparse edge data for apply_noise
+        self.data = protein_data
+        # Apply noise
+        noisy_data = self.apply_noise(X, data_edge_attr, node_mask)
+        pred = self.forward(noisy_data)
+
+        # Convert sparse edge ground truth to dense, matching validation logic
+        edge_index = protein_data.edge_index
+        batch = protein_data.batch
+        true_E = data_edge_attr
+        pred_E = pred.E
+        dense_E = torch.zeros(pred_E.size(0), pred_E.size(1), pred_E.size(2), pred_E.size(3), device=pred_E.device)
+        for i in range(batch_size):
+            protein_node_mask = (batch == i)
+            protein_node_indices = torch.where(protein_node_mask)[0]
+            protein_edge_mask = torch.isin(edge_index[0], protein_node_indices)
+            protein_edges = edge_index[:, protein_edge_mask]
+            protein_edge_features = true_E[protein_edge_mask]
+            local_edge_index = torch.zeros_like(protein_edges)
+            for j, global_idx in enumerate(protein_node_indices):
+                local_edge_index[0][protein_edges[0] == global_idx] = j
+                local_edge_index[1][protein_edges[1] == global_idx] = j
+            dense_E[i, local_edge_index[0], local_edge_index[1]] = protein_edge_features
+
+        # Debug prints for shapes
+        print(f"[DEBUG] pred.X shape: {pred.X.shape}, X shape: {X.shape}")
+        print(f"[DEBUG] pred.E shape: {pred_E.shape}, dense_E shape: {dense_E.shape}")
+
+        # Use dense edge metric computation
+        self.test_nll(pred.X, X)
+        self.test_X_kl(pred.X, X)
+        self.test_E_kl(pred_E, dense_E)
+        self.test_X_logp(pred.X, X)
+        self.test_E_logp(pred_E, dense_E)
+        
+        # Store y for sequence metrics if available
+        if hasattr(protein_data, 'y'):
+            self.test_y_collection.append(protein_data.y)
+        nll_value = self.test_nll.compute()
+        self.log('test_nll', nll_value, batch_size=batch_size, sync_dist=True)
+        return {'loss': nll_value}
+
+    def on_test_epoch_start(self) -> None:
+        self.test_nll.reset()
+        self.test_X_kl.reset()
+        self.test_E_kl.reset()
+        self.test_X_logp.reset()
+        self.test_E_logp.reset()
+        self.test_y_collection = []
+
+    def on_test_epoch_end(self):
+        metrics = [
+            self.test_nll.compute(),
+            self.test_X_kl.compute() * self.T,
+            self.test_E_kl.compute() * self.T,
+            self.test_X_logp.compute(),
+            self.test_E_logp.compute()
+        ]
+        print(f"Test NLL: {metrics[0]:.2f} -- Test Atom type KL: {metrics[1]:.2f} -- Test Edge type KL: {metrics[2]:.2f}")
+        self.log("test/NLL", metrics[0], sync_dist=True)
+        self.log("test/X_KL", metrics[1], sync_dist=True)
+        self.log("test/E_KL", metrics[2], sync_dist=True)
+        self.log("test/X_logp", metrics[3], sync_dist=True)
+        self.log("test/E_logp", metrics[4], sync_dist=True)
+        
+        # Sequence-based metrics (validity, uniqueness, novelty) on generated samples
+        # Here we assume you want to sample from the model for sequence metrics
+        # You may want to adjust batch size and number of samples as needed
+        samples, all_ys = [], []
+        num_samples = 32  # or another number as appropriate
+        for _ in range(num_samples):
+            # Generate a batch of samples (adjust as needed)
+            y = torch.zeros(1, self.ydim, device=self.device)  # dummy y
+            X_sample, E_sample, y_sample, node_mask = self.sample_batch(
+                batch_id=0, batch_size=1, y=y, keep_chain=1, number_chain_steps=self.number_chain_steps, save_final=1
+            )
+            samples.append((X_sample, E_sample))
+            all_ys.append(y_sample)
+        print("Computing sequence-based test metrics...")
+        # Call the sampling metrics properly
+        self.sampling_metrics(samples, all_ys, self.name, self.current_epoch, test=True) 

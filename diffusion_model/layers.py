@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from .conditions import modulate
 from itertools import repeat
 import collections.abc
+import math
 
 def _ntuple(n):
     def parse(x):
@@ -15,16 +16,44 @@ def _ntuple(n):
 to_2tuple = _ntuple(2)
 
 class TimestepEmbedder(nn.Module):
-    def __init__(self, hidden_size):
+    """
+    Embeds scalar timesteps into vector representations.
+    """
+    def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size * 4),
+            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
             nn.SiLU(),
-            nn.Linear(hidden_size * 4, hidden_size),
+            nn.Linear(hidden_size, hidden_size, bias=True),
         )
+        self.frequency_embedding_size = frequency_embedding_size
+
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        """
+        Create sinusoidal timestep embeddings.
+        :param t: a 1-D Tensor of N indices, one per batch element.
+                          These may be fractional.
+        :param dim: the dimension of the output.
+        :param max_period: controls the minimum frequency of the embeddings.
+        :return: an (N, D) Tensor of positional embeddings.
+        """
+        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+        ).to(device=t.device)
+        args = t[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        return embedding
 
     def forward(self, t):
-        return self.mlp(t)
+        t = t.view(-1)
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        t_emb = self.mlp(t_freq)
+        return t_emb
 
 
 class ClusterContinuousEmbedder(nn.Module):
@@ -142,7 +171,8 @@ class ProteinAttention(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         print(f"attn before mask: {attn.shape}")
         
-        # Apply node mask - expand to match attention dimensions
+        # Ensure node_mask is boolean for logical operations
+        node_mask = node_mask.bool()
         node_mask = node_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, N]
         print(f"expanded node_mask: {node_mask.shape}")
         attn = attn.masked_fill(~node_mask, float('-inf'))
@@ -225,7 +255,9 @@ class OutLayer(nn.Module):
         seq_out = p_in + seq_out
 
         # Handle edge masking
-        edge_mask = (~node_mask)[:, :, None] & (~node_mask)[:, None, :]
+        # Ensure node_mask is boolean for the ~ operator
+        node_mask_bool = node_mask.bool()
+        edge_mask = (~node_mask_bool)[:, :, None] & (~node_mask_bool)[:, None, :]
         diag_mask = (
             torch.eye(N, dtype=torch.bool)
             .unsqueeze(0)

@@ -17,16 +17,17 @@ general:
   final_model_samples_to_save: 20
   final_model_chains_to_save: 1
   save_model: true
-  test_only: false
+  test_only: null
+  resume: null  # Set to checkpoint path to resume from
 
 # Model configuration
 model:
   type: 'discrete'
   transition: 'marginal'
   model: 'protein_dit'
-  hidden_size: 256
-  depth: 6
-  num_heads: 8
+  hidden_size: 512
+  depth: 12
+  num_heads: 16
   mlp_ratio: 4
   diffusion_steps: 1000
   diffusion_noise_schedule: 'cosine'
@@ -46,7 +47,7 @@ model:
 # Dataset configuration
 dataset:
   source: alphafold_train
-  root: /home/caom/AID3/Graph-DiT/data/protein_train
+  root: /home/caom/AID3/protein-dit/data/protein_train
   datadir: 'data/protein_train'
   pin_memory: true
   num_workers: 4
@@ -55,19 +56,19 @@ dataset:
 
 # Training configuration
 train:
-  batch_size: 32
+  batch_size: 32  # Larger batch size for multi-GPU
   max_epochs: 100
   lr: 1e-4
   weight_decay: 1e-5
   gradient_clip_val: 1.0
   early_stopping_patience: 10
   accelerator: gpu
-  devices: 2
-  precision: 16
-  strategy: ddp
-  limit_val_batches: 1
+  devices: 2  # Use 2 GPUs
+  strategy: ddp_find_unused_parameters_true  # DDP with unused parameter detection
+  precision: 32  # Use 32-bit precision for better stability
+  limit_val_batches: 2
   num_sanity_val_steps: 1
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 1  # No accumulation needed with larger batch
   val_check_interval: 1.0
   check_val_every_n_epoch: 1
   num_workers: 4
@@ -83,13 +84,11 @@ logging:
   use_wandb: true
   wandb_project: protein_diffusion
   wandb_name: protein_dit_run
-  resume_training: false
-  resume_ckpt_path: null
 
 # Data paths
 data:
-  train_path: /home/caom/AID3/Graph-DiT/data/protein_train/processed/protein_train_split.pt
-  val_path: /home/caom/AID3/Graph-DiT/data/protein_train/processed/protein_val_split.pt
-  test_path: /home/caom/AID3/Graph-DiT/data/protein_train/processed/protein_test_split.pt
+  train_path: /home/caom/AID3/protein-dit/data/protein_train/processed/protein_train_split.pt
+  val_path: /home/caom/AID3/protein-dit/data/protein_train/processed/protein_val_split.pt
+  test_path: /home/caom/AID3/protein-dit/data/protein_train/processed/protein_test_split.pt
   num_classes: 20  # Number of amino acids
   distance_bins: 5 

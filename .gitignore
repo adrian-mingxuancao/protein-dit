@@ -174,3 +174,5 @@ test_training.py
 *.hdf5
 *.npz
 *.npy
+*.err
+*.out

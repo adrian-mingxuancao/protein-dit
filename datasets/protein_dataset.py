@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Dataset, Data, InMemoryDataset
 from torch_geometric.loader import DataLoader
 import pytorch_lightning as pl
-from protein_dit.utils.graph_utils import to_dense, create_fully_connected_edges
+from utils.graph_utils import to_dense, create_fully_connected_edges
 
 class DatasetInfo:
     def __init__(self, train_dataset):
@@ -283,9 +283,20 @@ class ProteinDataModule(pl.LightningDataModule):
         
         # Create dataloaders
         print("Creating dataloaders...")
+        
+        # Use small batch sizes for testing, but respect the config
+        effective_batch_size = self.cfg.train.batch_size
+        actual_batch_size = min(effective_batch_size, 2)  # Cap at 2 for testing, can increase later
+        
+        print(f"[DEBUG] Using batch_size={actual_batch_size} (effective={effective_batch_size} with accumulation)", flush=True)
+        
+        # Use max_n_nodes from dataset info (already computed as 2699)
+        max_nodes = self.dataset_info.max_n_nodes
+        print(f"[DEBUG] Using max_nodes from dataset info: {max_nodes}", flush=True)
+        
         self.train_loader = DataLoader(
             self.train_dataset,
-            batch_size=self.cfg.train.batch_size,
+            batch_size=actual_batch_size,  # Use config batch size (capped)
             shuffle=True,
             num_workers=self.cfg.train.num_workers,
             pin_memory=True
@@ -293,7 +304,7 @@ class ProteinDataModule(pl.LightningDataModule):
         
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=self.cfg.train.batch_size,
+            batch_size=actual_batch_size,  # Use same batch size for validation
             shuffle=False,
             num_workers=self.cfg.train.num_workers,
             pin_memory=True
@@ -301,7 +312,7 @@ class ProteinDataModule(pl.LightningDataModule):
         
         self.test_loader = DataLoader(
             self.test_dataset,
-            batch_size=self.cfg.train.batch_size,
+            batch_size=actual_batch_size,  # Use config batch size (capped)
             shuffle=False,
             num_workers=self.cfg.train.num_workers,
             pin_memory=True

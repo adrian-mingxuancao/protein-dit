@@ -6,8 +6,14 @@ class SumExceptBatchMetric:
         self.reset()
     
     def __call__(self, pred, true):
-        """Compute metric summed over all dimensions except batch."""
-        return torch.sum(pred * true, dim=-1)
+        """Compute metric summed over all dimensions except batch and accumulate."""
+        metric = torch.sum(pred * true, dim=-1)
+        
+        # Accumulate for averaging
+        self.total += metric.sum().item()
+        self.count += 1
+        
+        return metric.sum()  # Return scalar for immediate use
     
     def reset(self):
         self.total = 0
@@ -21,9 +27,19 @@ class SumExceptBatchKL:
         self.reset()
     
     def __call__(self, pred, true):
-        """Compute KL divergence summed over all dimensions except batch."""
-        kl = torch.sum(true * (torch.log(true + 1e-10) - torch.log(pred + 1e-10)), dim=-1)
-        return kl
+        """Compute KL divergence and accumulate for averaging."""
+        # Apply softmax to predictions to get probabilities
+        pred_probs = torch.softmax(pred, dim=-1)
+        
+        # Compute KL divergence: KL(true || pred_probs) = sum(true * (log(true) - log(pred_probs)))
+        # Note: true should already be probabilities (one-hot encoded)
+        kl = torch.sum(true * (torch.log(true + 1e-10) - torch.log(pred_probs + 1e-10)))
+        
+        # Accumulate for averaging
+        self.total += kl.item()
+        self.count += 1
+        
+        return kl  # Return scalar for immediate use
     
     def reset(self):
         self.total = 0
@@ -37,9 +53,18 @@ class NLL:
         self.reset()
     
     def __call__(self, pred, true):
-        """Compute negative log likelihood."""
-        nll = -torch.sum(true * torch.log(pred + 1e-10), dim=-1)
-        return nll
+        """Compute negative log likelihood and accumulate for averaging."""
+        # Apply softmax to predictions to get probabilities
+        pred_probs = torch.softmax(pred, dim=-1)
+        
+        # Compute NLL: -sum(true * log(pred_probs))
+        nll = -torch.sum(true * torch.log(pred_probs + 1e-10))
+        
+        # Accumulate for averaging
+        self.total += nll.item()
+        self.count += 1
+        
+        return nll  # Return scalar for immediate use
     
     def reset(self):
         self.total = 0

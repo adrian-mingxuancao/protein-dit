@@ -1,7 +1,7 @@
 import torch
 from torch.nn import functional as F
 import numpy as np
-from protein_dit.utils import PlaceHolder
+from utils import PlaceHolder
 
 
 def sum_except_batch(x):
@@ -72,15 +72,18 @@ def sample_discrete_features(probX, probE, probP, node_mask, step=None, add_nois
     '''
     bs, n, _ = probX.shape
 
+    # Ensure node_mask is boolean for the ~ operator
+    node_mask_bool = node_mask.bool()
+
     # Sample amino acids
-    probX[~node_mask] = 1 / probX.shape[-1]
+    probX[~node_mask_bool] = 1 / probX.shape[-1]
     probX = probX.reshape(bs * n, -1)
     probX = probX + 1e-12
     probX = probX / probX.sum(dim=-1, keepdim=True)
     X_t = probX.multinomial(1).reshape(bs, n)
 
     # Sample edges
-    inverse_edge_mask = ~(node_mask.unsqueeze(1) * node_mask.unsqueeze(2))
+    inverse_edge_mask = ~(node_mask_bool.unsqueeze(1) * node_mask_bool.unsqueeze(2))
     diag_mask = torch.eye(n).unsqueeze(0).expand(bs, -1, -1)
 
     probE[inverse_edge_mask] = 1 / probE.shape[-1]
@@ -95,7 +98,7 @@ def sample_discrete_features(probX, probE, probP, node_mask, step=None, add_nois
     E_t = (E_t + torch.transpose(E_t, 1, 2))
 
     # Sample sequence
-    probP[~node_mask] = 1 / probP.shape[-1]
+    probP[~node_mask_bool] = 1 / probP.shape[-1]
     probP = probP.reshape(bs * n, -1)
     probP = probP + 1e-12
     probP = probP / probP.sum(dim=-1, keepdim=True)
@@ -144,13 +147,15 @@ def mask_distributions(true_X, true_E, true_P, pred_X, pred_E, pred_P, node_mask
     row_E[0] = 1.
     row_P = torch.ones(true_P.size(-1), dtype=true_P.dtype, device=true_P.device)
 
-    diag_mask = ~torch.eye(node_mask.size(1), device=node_mask.device, dtype=torch.bool).unsqueeze(0)
-    true_X[~node_mask] = row_X
-    true_E[~(node_mask.unsqueeze(1) * node_mask.unsqueeze(2) * diag_mask), :] = row_E
-    true_P[~node_mask] = row_P
-    pred_X[~node_mask] = row_X
-    pred_E[~(node_mask.unsqueeze(1) * node_mask.unsqueeze(2) * diag_mask), :] = row_E
-    pred_P[~node_mask] = row_P
+    # Ensure node_mask is boolean for the ~ operator
+    node_mask_bool = node_mask.bool()
+    diag_mask = ~torch.eye(node_mask_bool.size(1), device=node_mask_bool.device, dtype=torch.bool).unsqueeze(0)
+    true_X[~node_mask_bool] = row_X
+    true_E[~(node_mask_bool.unsqueeze(1) * node_mask_bool.unsqueeze(2) * diag_mask), :] = row_E
+    true_P[~node_mask_bool] = row_P
+    pred_X[~node_mask_bool] = row_X
+    pred_E[~(node_mask_bool.unsqueeze(1) * node_mask_bool.unsqueeze(2) * diag_mask), :] = row_E
+    pred_P[~node_mask_bool] = row_P
 
     return true_X, true_E, true_P, pred_X, pred_E, pred_P
 
