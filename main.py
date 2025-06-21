@@ -36,14 +36,14 @@ def main(cfg: DictConfig):
     )
 
     # Set working directory for resume if needed
-    if cfg.general.resume is not None and os.path.exists(cfg.general.resume):
-        os.chdir(os.path.dirname(cfg.general.resume))
+    if cfg.logging.resume_training and os.path.exists(cfg.logging.resume_ckpt_path):
+        os.chdir(os.path.dirname(cfg.logging.resume_ckpt_path))
     
     # Initialize model
-    if cfg.general.resume is not None and os.path.exists(cfg.general.resume):
-        print(f"Resuming from checkpoint: {cfg.general.resume}")
+    if cfg.logging.resume_training and os.path.exists(cfg.logging.resume_ckpt_path):
+        print(f"Resuming from checkpoint: {cfg.logging.resume_ckpt_path}")
         model = Protein_Graph_DiT.load_from_checkpoint(
-            cfg.general.resume,
+            cfg.logging.resume_ckpt_path,
             dataset_infos=dataset_infos,
             train_metrics=train_metrics,
             sampling_metrics=sampling_metrics,
@@ -93,7 +93,15 @@ def main(cfg: DictConfig):
         trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.general.resume)
         if cfg.general.save_model:
             trainer.save_checkpoint(f"checkpoints/{cfg.general.name}/last.ckpt")
-        trainer.test(model, datamodule=datamodule)
+        print("Training completed successfully!")
+        print("To run testing separately, use: python main.py ++general.test_only=<checkpoint_path>")
+        # Note: Testing is now separate from training to avoid interrupting training progress
+        # Uncomment the line below if you want to run testing immediately after training
+        # trainer.test(model, datamodule=datamodule)
+    else:
+        # Test-only mode
+        print(f"Running test-only mode with checkpoint: {cfg.general.test_only}")
+        trainer.test(model, datamodule=datamodule, ckpt_path=cfg.general.test_only)
 
 if __name__ == "__main__":
     main() 

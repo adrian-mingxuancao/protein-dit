@@ -351,6 +351,16 @@ class Protein_Graph_DiT(pl.LightningModule):
         if self.current_epoch / self.trainer.max_epochs in [0.25, 0.5, 0.75, 1.0]:
             print(f"Epoch {self.current_epoch}: Val NLL {metrics[0]:.2f} -- Val Atom type KL {metrics[1]:.2f} -- ",
                   f"Val Edge type KL: {metrics[2]:.2f}", 'Val loss: %.2f \t Best :  %.2f\n' % (metrics[0], self.best_val_nll))
+            
+            # Milestone sampling like Graph-DiT
+            try:
+                print(f"Starting milestone sampling at epoch {self.current_epoch}...")
+                self._do_milestone_sampling()
+                print(f"Milestone sampling completed at epoch {self.current_epoch}")
+            except Exception as e:
+                print(f"Warning: Milestone sampling failed at epoch {self.current_epoch}: {str(e)}")
+                print("Continuing training without milestone sampling...")
+        
         self.log("val/NLL", metrics[0], sync_dist=True)
         self.log("val/X_KL", metrics[1], sync_dist=True)
         self.log("val/E_KL", metrics[2], sync_dist=True)
@@ -358,7 +368,54 @@ class Protein_Graph_DiT(pl.LightningModule):
         self.log("val/E_logp", metrics[4], sync_dist=True)
         if metrics[0] < self.best_val_nll:
             self.best_val_nll = metrics[0]
-        self.val_counter += 1 
+        self.val_counter += 1
+
+    def _do_milestone_sampling(self):
+        """Generate samples at training milestones (25%, 50%, 75%, 100%) like Graph-DiT."""
+        try:
+            # Generate a small number of samples for milestone evaluation
+            samples, all_ys = [], []
+            num_samples = min(8, self.cfg.general.samples_to_generate)  # Small number for safety
+            
+            print(f"Generating {num_samples} samples for milestone evaluation...")
+            
+            for i in range(num_samples):
+                try:
+                    # Generate dummy y (you can modify this based on your needs)
+                    y = torch.zeros(1, self.ydim, device=self.device)
+                    
+                    # Generate sample with error handling
+                    X_sample, E_sample, y_sample, node_mask = self.sample_batch(
+                        batch_id=i, 
+                        batch_size=1, 
+                        y=y, 
+                        keep_chain=1, 
+                        number_chain_steps=self.number_chain_steps, 
+                        save_final=1
+                    )
+                    
+                    samples.append((X_sample, E_sample))
+                    all_ys.append(y_sample)
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to generate sample {i}: {str(e)}")
+                    continue
+            
+            if samples:
+                print(f"Successfully generated {len(samples)} samples, computing metrics...")
+                # Compute sampling metrics safely
+                try:
+                    self.sampling_metrics(samples, all_ys, self.name, self.current_epoch, test=False)
+                    print(f"Milestone sampling metrics computed for epoch {self.current_epoch}")
+                except Exception as e:
+                    print(f"Warning: Sampling metrics computation failed: {str(e)}")
+                    print("Continuing without sampling metrics...")
+            else:
+                print("Warning: No samples were generated successfully")
+                
+        except Exception as e:
+            print(f"Error in milestone sampling: {str(e)}")
+            # Don't raise the exception - just log and continue
 
     @torch.no_grad()
     def validation_step(self, data, batch_idx):
