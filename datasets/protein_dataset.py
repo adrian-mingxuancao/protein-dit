@@ -145,8 +145,31 @@ class DatasetInfo:
         Returns:
             String representation of the amino acid sequence
         """
-        # Define amino acid alphabet
-        amino_acids = 'ACDEFGHIKLMNPQRSTVWY'
+        # Define amino acid alphabet based on pronet_prepoc encoding
+        # The model uses Xdim=20, but original data had 26 classes
+        # We map the rare/ambiguous amino acids to standard ones
+        amino_acids = [
+            'H',  # 0: HIS/HID/HIE/HIP
+            'D',  # 1: ASP/ASH
+            'R',  # 2: ARG/ARN
+            'F',  # 3: PHE
+            'A',  # 4: ALA
+            'C',  # 5: CYS/CYX
+            'G',  # 6: GLY
+            'Q',  # 7: GLN
+            'E',  # 8: GLU/GLH
+            'K',  # 9: LYS/LYN
+            'L',  # 10: LEU
+            'M',  # 11: MET
+            'N',  # 12: ASN
+            'S',  # 13: SER
+            'Y',  # 14: TYR
+            'T',  # 15: THR
+            'I',  # 16: ILE
+            'W',  # 17: TRP
+            'P',  # 18: PRO
+            'V'   # 19: VAL (also maps to SEC, PYL, ASX, XLE, GLX, XXX)
+        ]
         
         # Convert one-hot to indices
         if node_features.dim() == 2:
@@ -157,6 +180,8 @@ class DatasetInfo:
             indices = node_features
             
         # Convert indices to amino acid sequence
+        # Note: Since the model uses 20 classes, any original index >= 20 
+        # would have been clamped to 19 during one-hot encoding
         sequence = ''.join([amino_acids[idx] if idx < len(amino_acids) else 'X' for idx in indices])
         
         return sequence
