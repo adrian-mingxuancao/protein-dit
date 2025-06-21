@@ -179,8 +179,19 @@ class DatasetInfo:
             # Already indices [num_nodes]
             indices = node_features
             
-        # Convert tensor to list for boolean operations
+        # Convert tensor to list and flatten if needed
         indices_list = indices.tolist()
+        
+        # Handle both single samples and batched samples
+        if isinstance(indices_list[0], list):
+            # Batched sample: flatten the list
+            indices_flat = []
+            for sublist in indices_list:
+                if isinstance(sublist, list):
+                    indices_flat.extend(sublist)
+                else:
+                    indices_flat.append(sublist)
+            indices_list = indices_flat
         
         # Convert indices to amino acid sequence
         # Note: Since the model uses 20 classes, any original index >= 20 
