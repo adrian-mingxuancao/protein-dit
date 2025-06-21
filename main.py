@@ -36,14 +36,22 @@ def main(cfg: DictConfig):
     )
 
     # Set working directory for resume if needed
-    if cfg.logging.resume_training and os.path.exists(cfg.logging.resume_ckpt_path):
-        os.chdir(os.path.dirname(cfg.logging.resume_ckpt_path))
-    
-    # Initialize model
-    if cfg.logging.resume_training and os.path.exists(cfg.logging.resume_ckpt_path):
-        print(f"Resuming from checkpoint: {cfg.logging.resume_ckpt_path}")
+    if cfg.general.test_only:
+        # Test-only mode
+        print(f"Running test-only mode with checkpoint: {cfg.general.test_only}")
+        os.chdir(os.path.dirname(cfg.general.test_only))
         model = Protein_Graph_DiT.load_from_checkpoint(
-            cfg.logging.resume_ckpt_path,
+            cfg.general.test_only,
+            dataset_infos=dataset_infos,
+            train_metrics=train_metrics,
+            sampling_metrics=sampling_metrics,
+            cfg=cfg
+        )
+    elif cfg.general.resume is not None and os.path.exists(cfg.general.resume):
+        print(f"Resuming from checkpoint: {cfg.general.resume}")
+        os.chdir(os.path.dirname(cfg.general.resume))
+        model = Protein_Graph_DiT.load_from_checkpoint(
+            cfg.general.resume,
             dataset_infos=dataset_infos,
             train_metrics=train_metrics,
             sampling_metrics=sampling_metrics,
