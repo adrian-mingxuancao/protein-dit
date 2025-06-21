@@ -18,7 +18,7 @@ general:
   final_model_chains_to_save: 1
   save_model: true
   test_only: null
-  resume: null  # Set to checkpoint path to resume from
+  resume: outputs/2025-06-20/08-59-29/checkpoints/protein_dit/last.ckpt  # Resume from latest checkpoint
 
 # Model configuration
 model:
