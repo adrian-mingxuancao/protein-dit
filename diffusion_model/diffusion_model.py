@@ -368,7 +368,7 @@ class Protein_Graph_DiT(pl.LightningModule):
         self.log("val/E_logp", metrics[4], sync_dist=True)
         if metrics[0] < self.best_val_nll:
             self.best_val_nll = metrics[0]
-        self.val_counter += 1
+        self.val_counter += 1 
 
     def _do_milestone_sampling(self):
         """Generate samples at training milestones (25%, 50%, 75%, 100%) like Graph-DiT."""
@@ -476,7 +476,7 @@ class Protein_Graph_DiT(pl.LightningModule):
 
         # Log NLL for this batch
         nll_value = self.val_nll.compute()
-        self.log('valid_nll', nll_value, batch_size=batch_size, sync_dist=True)
+        self.log('val/NLL', nll_value, batch_size=batch_size, sync_dist=True)
 
         # Store y for sampling metrics if available
         if hasattr(protein_data, 'y'):
