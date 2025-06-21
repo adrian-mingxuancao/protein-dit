@@ -179,19 +179,14 @@ class DatasetInfo:
             # Already indices [num_nodes]
             indices = node_features
             
-        # Convert tensor to list and flatten if needed
-        indices_list = indices.tolist()
+        # Convert tensor to numpy array first, then to list to ensure proper flattening
+        indices_np = indices.detach().cpu().numpy()
         
-        # Handle both single samples and batched samples
-        if isinstance(indices_list[0], list):
-            # Batched sample: flatten the list
-            indices_flat = []
-            for sublist in indices_list:
-                if isinstance(sublist, list):
-                    indices_flat.extend(sublist)
-                else:
-                    indices_flat.append(sublist)
-            indices_list = indices_flat
+        # Flatten the array if it's multi-dimensional
+        indices_flat = indices_np.flatten()
+        
+        # Convert to list of integers
+        indices_list = indices_flat.tolist()
         
         # Convert indices to amino acid sequence
         # Note: Since the model uses 20 classes, any original index >= 20 
