@@ -136,6 +136,31 @@ class DatasetInfo:
         
         print("Dataset info initialization complete!")
 
+    def convert_node_features_to_sequence(self, node_features):
+        """Convert one-hot encoded node features to amino acid sequence.
+        
+        Args:
+            node_features: Tensor of shape [num_nodes, num_classes] with one-hot encoded amino acids
+            
+        Returns:
+            String representation of the amino acid sequence
+        """
+        # Define amino acid alphabet
+        amino_acids = 'ACDEFGHIKLMNPQRSTVWY'
+        
+        # Convert one-hot to indices
+        if node_features.dim() == 2:
+            # One-hot encoded features [num_nodes, num_classes]
+            indices = node_features.argmax(dim=1)
+        else:
+            # Already indices [num_nodes]
+            indices = node_features
+            
+        # Convert indices to amino acid sequence
+        sequence = ''.join([amino_acids[idx] if idx < len(amino_acids) else 'X' for idx in indices])
+        
+        return sequence
+
 class ProteinDataset(InMemoryDataset):
     def __init__(self, data_path: str, transform=None):
         """
