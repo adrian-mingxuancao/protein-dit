@@ -168,21 +168,24 @@ class DatasetInfo:
             'I',  # 16: ILE
             'W',  # 17: TRP
             'P',  # 18: PRO
-            'V'   # 19: VAL (also maps to SEC, PYL, ASX, XLE, GLX, XXX)
+            'V',  # 19: VAL (also maps rare amino acids >= 20)
         ]
         
         # Convert one-hot to indices
         if node_features.dim() == 2:
             # One-hot encoded features [num_nodes, num_classes]
-            indices = node_features.argmax(dim=1)
+            indices = torch.argmax(node_features, dim=1)
         else:
             # Already indices [num_nodes]
             indices = node_features
             
+        # Convert tensor to list for boolean operations
+        indices_list = indices.tolist()
+        
         # Convert indices to amino acid sequence
         # Note: Since the model uses 20 classes, any original index >= 20 
         # would have been clamped to 19 during one-hot encoding
-        sequence = ''.join([amino_acids[idx] if idx < len(amino_acids) else 'X' for idx in indices])
+        sequence = ''.join([amino_acids[idx] if idx < len(amino_acids) else 'X' for idx in indices_list])
         
         return sequence
 

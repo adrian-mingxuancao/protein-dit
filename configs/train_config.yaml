@@ -18,7 +18,7 @@ general:
   final_model_chains_to_save: 1
   save_model: true
   test_only: null
-  resume: /home/caom/AID3/protein-dit/outputs/2025-06-20/08-59-29/checkpoints/protein_dit/last.ckpt  # Resume from latest checkpoint with absolute path
+  resume: /home/caom/AID3/protein-dit/outputs/2025-06-20/08-59-29/checkpoints/protein_dit/checkpoints/protein_dit/last.ckpt  # Resume from latest checkpoint with absolute path
 
 # Model configuration
 model:
