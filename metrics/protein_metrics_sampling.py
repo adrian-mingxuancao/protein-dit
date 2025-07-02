@@ -27,7 +27,7 @@ class SumExceptBatchKL:
         self.reset()
     
     def __call__(self, pred, true):
-        """Compute KL divergence and accumulate for averaging."""
+        """Compute KL divergence using PyTorch's F.kl_div (like Graph-DiT)."""
         # Debug prints to understand tensor shapes
         print(f"[DEBUG KL] pred shape: {pred.shape}, true shape: {true.shape}")
         print(f"[DEBUG KL] pred last dim: {pred.size(-1)}, true last dim: {true.size(-1)}")
@@ -35,10 +35,14 @@ class SumExceptBatchKL:
         # Apply softmax to predictions to get probabilities
         pred_probs = torch.softmax(pred, dim=-1)
         
-        # Compute KL divergence per sample: KL(true || pred_probs) = sum(true * (log(true) - log(pred_probs)))
-        # Note: true should already be probabilities (one-hot encoded)
-        kl_per_sample = torch.sum(true * (torch.log(true + 1e-10) - torch.log(pred_probs + 1e-10)), dim=-1)  # [batch_size, ...]
-        kl = torch.mean(kl_per_sample)  # Average over batch
+        # Use PyTorch's F.kl_div for proper KL divergence computation
+        # F.kl_div expects log-probabilities for predictions and probabilities for targets
+        pred_log_probs = torch.log_softmax(pred, dim=-1)
+        
+        # Compute KL divergence using PyTorch's implementation
+        kl = torch.nn.functional.kl_div(pred_log_probs, true, reduction='none')
+        kl = torch.sum(kl, dim=-1)  # Sum over feature dimensions
+        kl = torch.mean(kl)  # Average over batch
         
         # Accumulate for averaging across validation steps
         self.total += kl.item()
@@ -58,14 +62,14 @@ class NLL:
         self.reset()
     
     def __call__(self, pred, true):
-        """Compute negative log likelihood and accumulate for averaging."""
-        # Apply softmax to predictions to get probabilities
-        pred_probs = torch.softmax(pred, dim=-1)
+        """Compute negative log likelihood using PyTorch's cross_entropy (like Graph-DiT)."""
+        # Use PyTorch's cross_entropy for proper NLL computation
+        # Convert one-hot targets to class indices
+        target_indices = torch.argmax(true, dim=-1)
         
-        # Compute NLL per sample: -sum(true * log(pred_probs)) per batch
-        # Sum over feature dimensions, then mean over batch
-        nll_per_sample = -torch.sum(true * torch.log(pred_probs + 1e-10), dim=-1)  # [batch_size, ...]
-        nll = torch.mean(nll_per_sample)  # Average over batch
+        # Compute cross-entropy loss (which is NLL for one-hot targets)
+        nll = torch.nn.functional.cross_entropy(pred, target_indices, reduction='none')
+        nll = torch.mean(nll)  # Average over batch
         
         # Accumulate for averaging across validation steps
         self.total += nll.item()
