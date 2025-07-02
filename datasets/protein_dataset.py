@@ -185,8 +185,8 @@ class DatasetInfo:
         # Flatten the array if it's multi-dimensional
         indices_flat = indices_np.flatten()
         
-        # Convert to list of integers - ensure they are actually integers
-        indices_list = [int(idx) for idx in indices_flat.tolist()]
+        # Convert to list of integers
+        indices_list = indices_flat.tolist()
         
         # Convert indices to amino acid sequence
         # Note: Since the model uses 20 classes, any original index >= 20 

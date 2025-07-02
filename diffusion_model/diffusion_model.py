@@ -165,7 +165,7 @@ class Protein_Graph_DiT(pl.LightningModule):
             # Store sparse edge data for apply_noise
             self.data = protein_data
             # Apply noise using sparse kNN approach
-            noisy_data = self.apply_noise(X, data_edge_attr, node_mask, edge_index=protein_data.edge_index, batch=protein_data.batch)
+            noisy_data = self.apply_noise(X, data_edge_attr, node_mask)
             print("[DEBUG] Returned from apply_noise", flush=True)
             pred = self.forward(noisy_data)
             print("[DEBUG] Returned from forward", flush=True)
@@ -216,47 +216,32 @@ class Protein_Graph_DiT(pl.LightningModule):
             log = False
         self.loss_fn.log_epoch_metrics(self.current_epoch, self.start_epoch_time, log)
 
-    def apply_noise(self, X, E, node_mask, edge_index=None, batch=None):
-        """Apply noise to node and edge features using sparse kNN approach."""
+    def apply_noise(self, X, E, node_mask):
         try:
-            print(f"[DEBUG] apply_noise called with X shape: {X.shape}, E shape: {E.shape}", flush=True)
-            print(f"[DEBUG] node_mask shape: {node_mask.shape}", flush=True)
-            print(f"[DEBUG] edge_index provided: {edge_index is not None}", flush=True)
-            print(f"[DEBUG] batch provided: {batch is not None}", flush=True)
-            
+            print(f"\n[DEBUG] Entered apply_noise", flush=True)
+            print(f"Input shapes:")
+            print(f"X shape: {X.shape}")  # [batch_size, max_nodes, Xdim]
+            print(f"E shape: {E.shape}")  # [total_edges, Edim] - sparse kNN edges
+            print(f"node_mask shape: {node_mask.shape}")  # [batch_size, max_nodes]
             batch_size = X.size(0)
-            device = X.device
-            
-            # Get time step for noise application
-            t = torch.randint(0, self.T, (batch_size,), device=device)
-            t_normalized = t.float() / self.T
-            alpha_bar_t = self.noise_schedule.get_alpha_bar(t_normalized)
-            
+            max_nodes = X.size(1)
+            # Get timestep like Graph-DiT
+            print(f"[DEBUG] Creating time tensor with batch_size={batch_size}", flush=True)
+            t = torch.randint(0, self.T, (batch_size, 1), device=X.device).float()  # (bs, 1) like original Graph-DiT
+            print(f"[DEBUG] Time tensor shape: {t.shape}", flush=True)
+            t_float = t / self.T
+            print(f"[DEBUG] t_float shape: {t_float.shape}", flush=True)
+            alpha_bar_t = self.noise_schedule.get_alpha_bar(t_normalized=t_float)
             print(f"[DEBUG] Using sparse kNN approach", flush=True)
             print(f"[DEBUG] alpha_bar_t: {alpha_bar_t}", flush=True)
             # For sparse kNN edges, process each protein separately
             X_t_list = []
             E_t_list = []
-            
-            # Use provided edge_index and batch, or fall back to self.data if available
-            if edge_index is None and self.data is not None:
-                edge_index = self.data.edge_index  # [2, total_edges]
-                batch_tensor = self.data.batch  # [total_nodes]
-            elif edge_index is not None and batch is not None:
-                edge_index = edge_index
-                batch_tensor = batch
-            else:
-                # If no edge information is available, we need to create it
-                # This is a fallback for cases where edge information is missing
-                print(f"[WARNING] No edge information available, creating dummy edges", flush=True)
-                # Create a simple edge index for the current batch
-                total_nodes = X.size(0) * X.size(1)
-                edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)
-                batch_tensor = torch.arange(X.size(0), device=device).repeat_interleave(X.size(1))
-            
+            # Get edge index from stored data
+            edge_index = self.data.edge_index  # [2, total_edges]
+            batch_tensor = self.data.batch  # [total_nodes]
             print(f"[DEBUG] edge_index shape: {edge_index.shape}", flush=True)
             print(f"[DEBUG] batch_tensor shape: {batch_tensor.shape}", flush=True)
-            
             for i in range(batch_size):
                 # Get current protein
                 X_protein = X[i:i+1]  # [1, max_nodes, Xdim]
@@ -265,50 +250,34 @@ class Protein_Graph_DiT(pl.LightningModule):
                 print(f"\nProcessing protein {i}:", flush=True)
                 print(f"X_protein shape: {X_protein.shape}", flush=True)
                 print(f"alpha_i: {alpha_i}", flush=True)
-                
                 # Get edges for this protein by checking which edges have both source and target in this protein
                 # First, get the node indices for this protein
                 protein_node_mask = (batch_tensor == i)  # [total_nodes]
                 protein_node_indices = torch.where(protein_node_mask)[0]  # Indices of nodes in this protein
-                
-                if len(protein_node_indices) > 0:
-                    # Get the start and end indices for this protein's nodes
-                    start_idx = protein_node_indices[0]
-                    end_idx = protein_node_indices[-1] + 1
-                    # Filter edges where both source and target are in this protein
-                    src_in_protein = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx)
-                    dst_in_protein = (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
-                    protein_edge_mask = src_in_protein & dst_in_protein
-                    edge_indices = edge_index[:, protein_edge_mask]  # [2, num_edges_in_protein]
-                    edge_features = E[protein_edge_mask]  # [num_edges_in_protein, Edim]
-                else:
-                    # No nodes for this protein, create empty edges
-                    edge_indices = torch.zeros((2, 0), dtype=torch.long, device=device)
-                    edge_features = torch.zeros((0, E.size(-1)), device=device)
-                
+                # Get the start and end indices for this protein's nodes
+                start_idx = protein_node_indices[0] if len(protein_node_indices) > 0 else 0
+                end_idx = protein_node_indices[-1] + 1 if len(protein_node_indices) > 0 else 0
+                # Filter edges where both source and target are in this protein
+                src_in_protein = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx)
+                dst_in_protein = (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
+                protein_edge_mask = src_in_protein & dst_in_protein
+                edge_indices = edge_index[:, protein_edge_mask]  # [2, num_edges_in_protein]
+                edge_features = E[protein_edge_mask]  # [num_edges_in_protein, Edim]
                 print(f"Protein {i} edges: {edge_indices.shape}, features: {edge_features.shape}", flush=True)
-                
                 # Apply noise to node features
                 uniform_X = torch.ones_like(X_protein) / self.Xdim
                 X_t = alpha_i * X_protein + (1 - alpha_i) * uniform_X
-                
                 # Apply noise to edge features
-                if edge_features.size(0) > 0:
-                    uniform_E = torch.ones_like(edge_features) / self.Edim
-                    E_t = alpha_i * edge_features + (1 - alpha_i) * uniform_E
-                else:
-                    E_t = edge_features  # Keep empty
-                
+                uniform_E = torch.ones_like(edge_features) / self.Edim
+                E_t = alpha_i * edge_features + (1 - alpha_i) * uniform_E
                 # Store results
                 X_t_list.append(X_t)
                 E_t_list.append(E_t)
-            
             # Concatenate results
             X_t = torch.cat(X_t_list, dim=0)  # [batch_size, max_nodes, Xdim]
             E_t = torch.cat(E_t_list, dim=0)  # [total_edges, Edim] - keep sparse
             print(f"[DEBUG] Final X_t shape: {X_t.shape}", flush=True)
             print(f"[DEBUG] Final E_t shape: {E_t.shape}", flush=True)
-            
             # Keep everything sparse! No dense conversion needed
             # The denoiser will handle sparse edges directly
             return {
@@ -399,7 +368,7 @@ class Protein_Graph_DiT(pl.LightningModule):
         self.log("val/E_logp", metrics[4], sync_dist=True)
         if metrics[0] < self.best_val_nll:
             self.best_val_nll = metrics[0]
-        self.val_counter += 1 
+        self.val_counter += 1
 
     def _do_milestone_sampling(self):
         """Generate samples at training milestones (25%, 50%, 75%, 100%) like Graph-DiT."""
@@ -575,7 +544,7 @@ class Protein_Graph_DiT(pl.LightningModule):
         if hasattr(protein_data, 'y'):
             self.test_y_collection.append(protein_data.y)
         nll_value = self.test_nll.compute()
-        self.log('test_nll', nll_value, batch_size=batch_size, sync_dist=True)
+        self.log('test/NLL', nll_value, batch_size=batch_size, sync_dist=True)
         return {'loss': nll_value}
 
     def on_test_epoch_start(self) -> None:
