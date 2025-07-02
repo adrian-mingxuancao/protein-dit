@@ -28,14 +28,19 @@ class SumExceptBatchKL:
     
     def __call__(self, pred, true):
         """Compute KL divergence and accumulate for averaging."""
+        # Debug prints to understand tensor shapes
+        print(f"[DEBUG KL] pred shape: {pred.shape}, true shape: {true.shape}")
+        print(f"[DEBUG KL] pred last dim: {pred.size(-1)}, true last dim: {true.size(-1)}")
+        
         # Apply softmax to predictions to get probabilities
         pred_probs = torch.softmax(pred, dim=-1)
         
-        # Compute KL divergence: KL(true || pred_probs) = sum(true * (log(true) - log(pred_probs)))
+        # Compute KL divergence per sample: KL(true || pred_probs) = sum(true * (log(true) - log(pred_probs)))
         # Note: true should already be probabilities (one-hot encoded)
-        kl = torch.sum(true * (torch.log(true + 1e-10) - torch.log(pred_probs + 1e-10)))
+        kl_per_sample = torch.sum(true * (torch.log(true + 1e-10) - torch.log(pred_probs + 1e-10)), dim=-1)  # [batch_size, ...]
+        kl = torch.mean(kl_per_sample)  # Average over batch
         
-        # Accumulate for averaging
+        # Accumulate for averaging across validation steps
         self.total += kl.item()
         self.count += 1
         
@@ -57,10 +62,12 @@ class NLL:
         # Apply softmax to predictions to get probabilities
         pred_probs = torch.softmax(pred, dim=-1)
         
-        # Compute NLL: -sum(true * log(pred_probs))
-        nll = -torch.sum(true * torch.log(pred_probs + 1e-10))
+        # Compute NLL per sample: -sum(true * log(pred_probs)) per batch
+        # Sum over feature dimensions, then mean over batch
+        nll_per_sample = -torch.sum(true * torch.log(pred_probs + 1e-10), dim=-1)  # [batch_size, ...]
+        nll = torch.mean(nll_per_sample)  # Average over batch
         
-        # Accumulate for averaging
+        # Accumulate for averaging across validation steps
         self.total += nll.item()
         self.count += 1
         
